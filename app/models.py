@@ -8,7 +8,7 @@ class User(Base):
     id = Column(Integer, primary_key = True)
     name = Column(String, nullable = False)
     email = Column(String, nullable = True, unique = True)
-    messages = relationship("Message", back_populates = "user")
+    messages = relationship("Message", back_populates = "users")
     rooms = relationship("Room", back_populates = "users", secondary = "user_rooms")
 
 class Room(Base):
@@ -16,7 +16,7 @@ class Room(Base):
     id = Column(Integer, primary_key = True)
     name = Column(String, nullable = False, unique = True)
     users = relationship("User", back_populates = "rooms", secondary = "user_rooms")
-    messages = relationship("Message", back_populates = "room")
+    messages = relationship("Message", back_populates = "rooms")
 
 class Message(Base):
     __tablename__ = "messages"
@@ -25,8 +25,8 @@ class Message(Base):
     created_at = Column(DateTime, default = lambda: datetime.now(timezone.utc))
     user_id = Column(Integer, ForeignKey("users.id"), index = True)
     room_id = Column(Integer, ForeignKey("rooms.id"), index = True)
-    user = relationship("User", back_populates = "messages")
-    room = relationship("Room", back_populates = "messages")
+    users = relationship("User", back_populates = "messages")
+    rooms = relationship("Room", back_populates = "messages")
 
 class UserRoom(Base):
     __tablename__ = "user_rooms"
