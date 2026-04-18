@@ -1,10 +1,53 @@
-from fastapi import APIRouter, Depends, HTTPException 
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from sqlalchemy.orm import Session, joinedload
 from app.database import get_db, Base, engine
 from app.models import User, Room, UserRoom, Message
 from typing import Optional
-from app.pydantic_models import CreateUser, CreateRoom, JoinRoom, UserResponse, RoomResponse
+from app.pydantic_models import CreateUser, CreateRoom, JoinRoom, UserResponse, RoomResponse, MessageResponse
+from app.connection_manager import manager
+
 router = APIRouter()
+
+@router.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            user = db.query(User).filter(User.id == data["user_id"]).first()
+            if not user:
+                raise HTTPException(status_code = 404, detail = "User was not found")
+            room = db.query(Room).filter(Room.id == data["room_id"]).first()
+            if not room:
+                raise HTTPException(status_code = 404, detail = "Room was not found")
+            new_message = Message(text = data["text"], user_id = data["user_id"], room_id = data["room_id"])
+            db.add(new_message)
+            db.commit()
+            db.refresh(new_message)
+            message_data = {"id": new_message.id,
+                            "user_id": user.id,
+                            "username": user.name,
+                            "room_id": new_message.room_id,
+                            "text": new_message.text,
+                            "created_at": new_message.created_at.isoformat()
+                            }  
+            await manager.broadcast(message_data)
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast("Someone has left the chat")
+
+
+@router.get("/rooms/{room_id}/messages", response_model = list[MessageResponse])
+def get_messages(room_id: int, limit: int = 20, before: int = None, db: Session = Depends(get_db)):
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code = 404, detail = "Room not found")
+    messages = db.query(Message).filter(Message.room_id == room_id).options(joinedload(Message.users))
+    if before:
+        messages = messages.filter(Message.id < before)
+    messages = messages.order_by(Message.id.desc()).limit(limit).all()
+    return messages
 
 @router.get("/rooms", response_model = list[RoomResponse])
 def get_rooms(db: Session = Depends(get_db)):

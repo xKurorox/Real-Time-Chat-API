@@ -21,6 +21,17 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class MessageResponse(BaseModel):
+    id: int
+    text: str
+    user_id : int
+    users: UserResponse
+    room_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class RoomResponse(BaseModel):
     id: int
     name: str
