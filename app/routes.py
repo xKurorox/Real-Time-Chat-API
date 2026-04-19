@@ -14,28 +14,50 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
     try:
         while True:
             data = await websocket.receive_json()
-            user = db.query(User).filter(User.id == data["user_id"]).first()
-            if not user:
-                raise HTTPException(status_code = 404, detail = "User was not found")
-            room = db.query(Room).filter(Room.id == data["room_id"]).first()
-            if not room:
-                raise HTTPException(status_code = 404, detail = "Room was not found")
-            new_message = Message(text = data["text"], user_id = data["user_id"], room_id = data["room_id"])
-            db.add(new_message)
-            db.commit()
-            db.refresh(new_message)
-            message_data = {"id": new_message.id,
-                            "user_id": user.id,
-                            "username": user.name,
-                            "room_id": new_message.room_id,
-                            "text": new_message.text,
-                            "created_at": new_message.created_at.isoformat()
-                            }  
-            await manager.broadcast(message_data)
-
+            if data["type"] == "message":
+                user = db.query(User).filter(User.id == data["user_id"]).first()
+                if not user:
+                    await websocket.send_json({"type": "error", "message": "User was not found"})
+                    continue
+                room = db.query(Room).filter(Room.id == data["room_id"]).first()
+                if not room:
+                    await websocket.send_json({"type": "error", "message": "Room was not found"})
+                    continue
+                new_message = Message(text = data["text"], user_id = data["user_id"], room_id = data["room_id"])
+                db.add(new_message)
+                db.commit()
+                db.refresh(new_message)
+                message_data = {"id": new_message.id,
+                                "user_id": user.id,
+                                "username": user.name,
+                                "room_id": new_message.room_id,
+                                "text": new_message.text,
+                                "created_at": new_message.created_at.isoformat()
+                                }  
+                await manager.broadcast(message_data)
+            elif data["type"] == "typing":
+                user = db.query(User).filter(User.id == data["user_id"]).first()
+                if not user:
+                        await websocket.send_json({"type": "error", "message": "User was not found"})
+                        continue
+                typing_data = {"type": "typing", "username": user.name, "room_id": data["room_id"]}
+                await manager.broadcast(typing_data, websocket)
+            elif data["type"] == "join":
+                user = db.query(User).filter(User.id == data["user_id"]).first()
+                if not user:
+                    await websocket.send_json({"type": "error", "message": "User was not found"})
+                    continue
+                manager.register_user(websocket, {"user_id": user.id, "username": user.name})
+                presence_data = {"type": "presence", "username": user.name, "status": "online"}
+                await manager.broadcast(presence_data)
+            else:
+                await websocket.send_json({"type": "error", "message": "Unknown event type"})
     except WebSocketDisconnect:
+        user_info = manager.user_connections.get(websocket)
         manager.disconnect(websocket)
-        await manager.broadcast("Someone has left the chat")
+        if  user_info:
+            presence_data = {"type": "presence", "username": user_info["username"], "status": "offline"}
+            await manager.broadcast(presence_data)
 
 
 @router.get("/rooms/{room_id}/messages", response_model = list[MessageResponse])
