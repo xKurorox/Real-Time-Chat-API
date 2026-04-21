@@ -8,74 +8,93 @@ from app.connection_manager import manager
 
 router = APIRouter()
 
+# WebSocket endpoint — handles all real-time events (join, message, typing)
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)):
     await manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_json()
+
             if data["type"] == "message":
+                # Validate the user exists
                 user = db.query(User).filter(User.id == data["user_id"]).first()
                 if not user:
                     await websocket.send_json({"type": "error", "message": "User was not found"})
                     continue
+                # Validate the room exists
                 room = db.query(Room).filter(Room.id == data["room_id"]).first()
                 if not room:
                     await websocket.send_json({"type": "error", "message": "Room was not found"})
                     continue
+                # Persist the message to the database
                 new_message = Message(text = data["text"], user_id = data["user_id"], room_id = data["room_id"])
                 db.add(new_message)
                 db.commit()
                 db.refresh(new_message)
+                # Build the broadcast payload and send to all connected clients
                 message_data = {"id": new_message.id,
                                 "user_id": user.id,
                                 "username": user.name,
                                 "room_id": new_message.room_id,
                                 "text": new_message.text,
                                 "created_at": new_message.created_at.isoformat()
-                                }  
+                                }
                 await manager.broadcast(message_data)
+
             elif data["type"] == "typing":
                 user = db.query(User).filter(User.id == data["user_id"]).first()
                 if not user:
-                        await websocket.send_json({"type": "error", "message": "User was not found"})
-                        continue
+                    await websocket.send_json({"type": "error", "message": "User was not found"})
+                    continue
                 typing_data = {"type": "typing", "username": user.name, "room_id": data["room_id"]}
+                # Exclude the sender so they don't receive their own typing indicator
                 await manager.broadcast(typing_data, websocket)
+
             elif data["type"] == "join":
                 user = db.query(User).filter(User.id == data["user_id"]).first()
                 if not user:
                     await websocket.send_json({"type": "error", "message": "User was not found"})
                     continue
+                # Register the user's identity on this WebSocket connection
                 manager.register_user(websocket, {"user_id": user.id, "username": user.name})
+                # Broadcast online presence to all connected clients
                 presence_data = {"type": "presence", "username": user.name, "status": "online"}
                 await manager.broadcast(presence_data)
+
             else:
                 await websocket.send_json({"type": "error", "message": "Unknown event type"})
+
     except WebSocketDisconnect:
+        # Look up user info before removing the connection so we can broadcast offline status
         user_info = manager.user_connections.get(websocket)
         manager.disconnect(websocket)
-        if  user_info:
+        if user_info:
             presence_data = {"type": "presence", "username": user_info["username"], "status": "offline"}
             await manager.broadcast(presence_data)
 
 
+# Returns paginated message history for a room, ordered newest first
 @router.get("/rooms/{room_id}/messages", response_model = list[MessageResponse])
 def get_messages(room_id: int, limit: int = 20, before: int = None, db: Session = Depends(get_db)):
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code = 404, detail = "Room not found")
+    # joinedload fetches the related User in the same query to avoid N+1 queries
     messages = db.query(Message).filter(Message.room_id == room_id).options(joinedload(Message.users))
     if before:
+        # Cursor pagination — only return messages older than the given message ID
         messages = messages.filter(Message.id < before)
     messages = messages.order_by(Message.id.desc()).limit(limit).all()
     return messages
 
+# Returns all rooms
 @router.get("/rooms", response_model = list[RoomResponse])
 def get_rooms(db: Session = Depends(get_db)):
     list_rooms = db.query(Room).all()
     return list_rooms
 
+# Returns all members of a room
 @router.get("/rooms/{room_id}/members", response_model = list[UserResponse])
 def get_room_members(room_id: int, db: Session = Depends(get_db)):
     room = db.query(Room).filter(Room.id == room_id).first()
@@ -83,6 +102,7 @@ def get_room_members(room_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code = 404, detail = "Room not found")
     return room.users
 
+# Creates a new user; name must be unique, email (if provided) must also be unique
 @router.post("/users", response_model = UserResponse)
 def create_user(user: CreateUser, db: Session = Depends(get_db)):
     user_name = db.query(User).filter(User.name == user.name).first()
@@ -91,13 +111,14 @@ def create_user(user: CreateUser, db: Session = Depends(get_db)):
     if user.email:
         user_email = db.query(User).filter(User.email == user.email).first()
         if user_email:
-            raise HTTPException(status_code = 409, detail = "Email already in use")        
+            raise HTTPException(status_code = 409, detail = "Email already in use")
     new_user = User(name = user.name, email = user.email)
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
 
+# Creates a new room and automatically adds the creator as a member
 @router.post("/rooms", response_model = RoomResponse)
 def create_room(room: CreateRoom, db: Session = Depends(get_db)):
     existing_room = db.query(Room).filter(Room.name == room.name).first()
@@ -108,6 +129,7 @@ def create_room(room: CreateRoom, db: Session = Depends(get_db)):
         raise HTTPException(status_code = 404, detail = "Not a valid user id")
     new_room = Room(name = room.name)
     db.add(new_room)
+    # flush assigns new_room.id without committing, so we can use it in the UserRoom insert below
     db.flush()
     new_user_room = UserRoom(room_id = new_room.id, user_id = existing_user.id)
     db.add(new_user_room)
@@ -115,6 +137,7 @@ def create_room(room: CreateRoom, db: Session = Depends(get_db)):
     db.refresh(new_room)
     return new_room
 
+# Adds an existing user to an existing room; rejects duplicates
 @router.post("/rooms/{room_id}/members")
 def new_room_member(user: JoinRoom, room_id: int, db: Session = Depends(get_db)):
     existing_user = db.query(User).filter(User.id == user.user_id).first()
