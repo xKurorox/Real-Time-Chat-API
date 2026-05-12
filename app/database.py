@@ -1,10 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from sqlalchemy import create_engine
-
-from sqlalchemy.orm import sessionmaker, declarative_base
-
 # Connect to SQLite database file; check_same_thread=False allows FastAPI's threads to share the connection
 engine = create_engine("sqlite:///./url.db", connect_args = {"check_same_thread": False})
 
